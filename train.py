@@ -30,15 +30,20 @@ parser.add_argument(
 parser.add_argument(
     '--affine', action='store_true', help='use affine coupling instead of additive'
 )
+parser.add_argument(
+    '--dataset', default='celeba', help='choose from celeba | cifar10 | lsun'
+)
 parser.add_argument('--n_bits', default=5, type=int, help='number of bits')
 parser.add_argument('--lr', default=1e-4, type=float, help='learning rate')
 parser.add_argument('--img_size', default=64, type=int, help='image size')
 parser.add_argument('--temp', default=0.7, type=float, help='temperature of sampling')
 parser.add_argument('--n_sample', default=20, type=int, help='number of samples')
+parser.add_argument('--mod_path', type=str, help='Path to model checkpoint')
+parser.add_argument('--opt_path', type=str, help='Path to optimizer checkpoint')
 parser.add_argument('path', metavar='PATH', type=str, help='Path to image directory')
 
 
-def sample_data(path, batch_size, image_size):
+def sample_data(path, batch_size, image_size, dataset):
     transform = transforms.Compose(
         [
             transforms.Resize(image_size),
@@ -49,7 +54,12 @@ def sample_data(path, batch_size, image_size):
         ]
     )
 
-    dataset = datasets.ImageFolder(path, transform=transform)
+    if dataset == 'cifar10':
+        dataset = datasets.CIFAR10(path, transform=transform)
+    elif dataset == 'lsun':
+        dataset = datasets.LSUN(path, classes=['church_outdoor_train'], transform=transform)
+    else:
+        dataset = datasets.ImageFolder(path, transform=transform)
     loader = DataLoader(dataset, shuffle=True, batch_size=batch_size, num_workers=4)
     loader = iter(loader)
 
@@ -95,7 +105,7 @@ def calc_loss(log_p, logdet, image_size, n_bins):
 
 
 def train(args, model, optimizer):
-    dataset = iter(sample_data(args.path, args.batch, args.img_size))
+    dataset = iter(sample_data(args.path, args.batch, args.img_size, args.dataset))
     n_bins = 2. ** args.n_bits
 
     z_sample = []
@@ -104,7 +114,10 @@ def train(args, model, optimizer):
         z_new = torch.randn(args.n_sample, *z) * args.temp
         z_sample.append(z_new.to(device))
 
-    with tqdm(range(args.iter)) as pbar:
+    epoch_id = 0
+    if args.mod_path:
+        epoch_id = int(args.mod_path.split("_")[1].split(".")[0])
+    with tqdm(range(epoch_id, args.iter)) as pbar:
         for i in pbar:
             image, _ = next(dataset)
             image = image.to(device)
@@ -132,7 +145,7 @@ def train(args, model, optimizer):
                 f'Loss: {loss.item():.5f}; logP: {log_p.item():.5f}; logdet: {log_det.item():.5f}; lr: {warmup_lr:.7f}'
             )
 
-            if i % 100 == 0:
+            if i % 500 == 0:
                 with torch.no_grad():
                     utils.save_image(
                         model_single.reverse(z_sample).cpu().data,
@@ -142,7 +155,7 @@ def train(args, model, optimizer):
                         range=(-0.5, 0.5),
                     )
 
-            if i % 10000 == 0:
+            if i % 2000 == 0:
                 torch.save(
                     model.state_dict(), f'checkpoint/model_{str(i + 1).zfill(6)}.pt'
                 )
@@ -162,6 +175,12 @@ if __name__ == '__main__':
     # model = model_single
     model = model.to(device)
 
+    if args.mod_path:
+        model.load_state_dict(torch.load(args.mod_path, map_location=lambda storage, loc: storage))
+
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
+
+    if args.opt_path:
+        optimizer.load_state_dict(torch.load(args.opt_path, map_location=lambda storage, loc: storage))
 
     train(args, model, optimizer)
